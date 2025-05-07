@@ -3,6 +3,7 @@ package com.fasterxml.jackson.databind.deser.std;
 import java.io.IOException;
 import java.util.*;
 
+import com.fasterxml.jackson.core.JsonParseException;
 import com.fasterxml.jackson.core.*;
 import com.fasterxml.jackson.databind.BeanProperty;
 import com.fasterxml.jackson.databind.DeserializationContext;
@@ -34,6 +35,8 @@ public class UntypedObjectDeserializer
     implements ResolvableDeserializer, ContextualDeserializer
 {
     private static final long serialVersionUID = 1L;
+
+    private static final int MAX_DEPTH = 1000;
 
     protected final static Object[] NO_OBJECTS = new Object[0];
 
@@ -176,66 +179,76 @@ public class UntypedObjectDeserializer
     @Override
     public Object deserialize(JsonParser jp, DeserializationContext ctxt) throws IOException
     {
+        return _deserialize(jp, ctxt, 0);
+    }
+
+    private Object _deserialize(JsonParser jp, DeserializationContext ctxt, int depth) throws IOException{
         switch (jp.getCurrentToken()) {
-        case FIELD_NAME:
-        case START_OBJECT:
-            if (_mapDeserializer != null) {
-                return _mapDeserializer.deserialize(jp, ctxt);
+            case FIELD_NAME:
+            case START_OBJECT:
+                if (_mapDeserializer != null) {
+                    return _mapDeserializer.deserialize(jp, ctxt);
+                }
+                if (depth > MAX_DEPTH) {
+                    throw new JsonParseException("JSON is too deeply nested.", jp.getCurrentLocation());
+                }
+                return mapObject(jp, ctxt, depth);
+            case START_ARRAY:
+                if (depth > MAX_DEPTH) {
+                    throw new JsonParseException("JSON is too deeply nested.", jp.getCurrentLocation());
+                }
+                if (ctxt.isEnabled(DeserializationFeature.USE_JAVA_ARRAY_FOR_JSON_ARRAY)) {
+                    return mapArrayToArray(jp, ctxt, depth);
+                }
+                if (_listDeserializer != null) {
+                    return _listDeserializer.deserialize(jp, ctxt);
+                }
+                return mapArray(jp, ctxt, depth);
+            case VALUE_EMBEDDED_OBJECT:
+                return jp.getEmbeddedObject();
+            case VALUE_STRING:
+                if (_stringDeserializer != null) {
+                    return _stringDeserializer.deserialize(jp, ctxt);
+                }
+                return jp.getText();
+    
+            case VALUE_NUMBER_INT:
+                if (_numberDeserializer != null) {
+                    return _numberDeserializer.deserialize(jp, ctxt);
+                }
+                /* [JACKSON-100]: caller may want to get all integral values
+                 * returned as BigInteger, for consistency
+                 */
+                if (ctxt.isEnabled(DeserializationFeature.USE_BIG_INTEGER_FOR_INTS)) {
+                    return jp.getBigIntegerValue(); // should be optimal, whatever it is
+                }
+                return jp.getNumberValue(); // should be optimal, whatever it is
+    
+            case VALUE_NUMBER_FLOAT:
+                if (_numberDeserializer != null) {
+                    return _numberDeserializer.deserialize(jp, ctxt);
+                }
+                /* [JACKSON-72]: need to allow overriding the behavior regarding
+                 *   which type to use
+                 */
+                if (ctxt.isEnabled(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)) {
+                    return jp.getDecimalValue();
+                }
+                return Double.valueOf(jp.getDoubleValue());
+    
+            case VALUE_TRUE:
+                return Boolean.TRUE;
+            case VALUE_FALSE:
+                return Boolean.FALSE;
+    
+            case VALUE_NULL: // should not get this but...
+                return null;
+    
+            case END_ARRAY: // invalid
+            case END_OBJECT: // invalid
+            default:
+                throw ctxt.mappingException(Object.class);
             }
-            return mapObject(jp, ctxt);
-        case START_ARRAY:
-            if (ctxt.isEnabled(DeserializationFeature.USE_JAVA_ARRAY_FOR_JSON_ARRAY)) {
-                return mapArrayToArray(jp, ctxt);
-            }
-            if (_listDeserializer != null) {
-                return _listDeserializer.deserialize(jp, ctxt);
-            }
-            return mapArray(jp, ctxt);
-        case VALUE_EMBEDDED_OBJECT:
-            return jp.getEmbeddedObject();
-        case VALUE_STRING:
-            if (_stringDeserializer != null) {
-                return _stringDeserializer.deserialize(jp, ctxt);
-            }
-            return jp.getText();
-
-        case VALUE_NUMBER_INT:
-            if (_numberDeserializer != null) {
-                return _numberDeserializer.deserialize(jp, ctxt);
-            }
-            /* [JACKSON-100]: caller may want to get all integral values
-             * returned as BigInteger, for consistency
-             */
-            if (ctxt.isEnabled(DeserializationFeature.USE_BIG_INTEGER_FOR_INTS)) {
-                return jp.getBigIntegerValue(); // should be optimal, whatever it is
-            }
-            return jp.getNumberValue(); // should be optimal, whatever it is
-
-        case VALUE_NUMBER_FLOAT:
-            if (_numberDeserializer != null) {
-                return _numberDeserializer.deserialize(jp, ctxt);
-            }
-            /* [JACKSON-72]: need to allow overriding the behavior regarding
-             *   which type to use
-             */
-            if (ctxt.isEnabled(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)) {
-                return jp.getDecimalValue();
-            }
-            return Double.valueOf(jp.getDoubleValue());
-
-        case VALUE_TRUE:
-            return Boolean.TRUE;
-        case VALUE_FALSE:
-            return Boolean.FALSE;
-
-        case VALUE_NULL: // should not get this but...
-            return null;
-
-        case END_ARRAY: // invalid
-        case END_OBJECT: // invalid
-        default:
-            throw ctxt.mappingException(Object.class);
-        }
     }
 
     @Override
@@ -308,19 +321,19 @@ public class UntypedObjectDeserializer
     /**
      * Method called to map a JSON Array into a Java value.
      */
-    protected Object mapArray(JsonParser jp, DeserializationContext ctxt) throws IOException
+    protected Object mapArray(JsonParser jp, DeserializationContext ctxt, int depth)  throws IOException
     {
         // Minor optimization to handle small lists (default size for ArrayList is 10)
         if (jp.nextToken()  == JsonToken.END_ARRAY) {
             return new ArrayList<Object>(2);
         }
-        Object value = deserialize(jp, ctxt);
+        Object value = _deserialize(jp, ctxt, depth + 1);
         if (jp.nextToken()  == JsonToken.END_ARRAY) {
             ArrayList<Object> l = new ArrayList<Object>(2);
             l.add(value);
             return l;
         }
-        Object value2 = deserialize(jp, ctxt);
+        Object value2 = _deserialize(jp, ctxt, depth + 1);
         if (jp.nextToken()  == JsonToken.END_ARRAY) {
             ArrayList<Object> l = new ArrayList<Object>(2);
             l.add(value);
@@ -334,7 +347,7 @@ public class UntypedObjectDeserializer
         values[ptr++] = value2;
         int totalSize = ptr;
         do {
-            value = deserialize(jp, ctxt);
+            value = _deserialize(jp, ctxt, depth + 1);
             ++totalSize;
             if (ptr >= values.length) {
                 values = buffer.appendCompletedChunk(values);
@@ -351,7 +364,7 @@ public class UntypedObjectDeserializer
     /**
      * Method called to map a JSON Object into a Java value.
      */
-    protected Object mapObject(JsonParser jp, DeserializationContext ctxt) throws IOException
+    protected Object mapObject(JsonParser jp, DeserializationContext ctxt, int depth)  throws IOException
     {
         JsonToken t = jp.getCurrentToken();
         if (t == JsonToken.START_OBJECT) {
@@ -364,7 +377,7 @@ public class UntypedObjectDeserializer
         }
         String field1 = jp.getCurrentName();
         jp.nextToken();
-        Object value1 = deserialize(jp, ctxt);
+        Object value1 = _deserialize(jp, ctxt, depth + 1);
         if (jp.nextToken() == JsonToken.END_OBJECT) { // single entry; but we want modifiable
             LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>(2);
             result.put(field1, value1);
@@ -372,7 +385,7 @@ public class UntypedObjectDeserializer
         }
         String field2 = jp.getCurrentName();
         jp.nextToken();
-        Object value2 = deserialize(jp, ctxt);
+        Object value2 = _deserialize(jp, ctxt, depth + 1);
         if (jp.nextToken() == JsonToken.END_OBJECT) {
             LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>(4);
             result.put(field1, value1);
@@ -386,7 +399,7 @@ public class UntypedObjectDeserializer
         do {
             String fieldName = jp.getCurrentName();
             jp.nextToken();
-            result.put(fieldName, deserialize(jp, ctxt));
+            result.put(fieldName, _deserialize(jp, ctxt, depth+1));
         } while (jp.nextToken() != JsonToken.END_OBJECT);
         return result;
     }
@@ -394,7 +407,7 @@ public class UntypedObjectDeserializer
     /**
      * Method called to map a JSON Array into a Java Object array (Object[]).
      */
-    protected Object[] mapArrayToArray(JsonParser jp, DeserializationContext ctxt) throws IOException
+    protected Object[] mapArrayToArray(JsonParser jp, DeserializationContext ctxt, int depth) throws IOException
     {
         // Minor optimization to handle small lists (default size for ArrayList is 10)
         if (jp.nextToken()  == JsonToken.END_ARRAY) {
@@ -404,7 +417,7 @@ public class UntypedObjectDeserializer
         Object[] values = buffer.resetAndStart();
         int ptr = 0;
         do {
-            Object value = deserialize(jp, ctxt);
+            Object value = _deserialize(jp, ctxt, depth + 1);
             if (ptr >= values.length) {
                 values = buffer.appendCompletedChunk(values);
                 ptr = 0;
@@ -434,18 +447,29 @@ public class UntypedObjectDeserializer
         @Override
         public Object deserialize(JsonParser jp, DeserializationContext ctxt) throws IOException
         {
+            return _deserialize(jp, ctxt, 0);
+        }
+
+        private Object _deserialize(JsonParser jp, DeserializationContext ctxt, int depth) throws IOException
+        {
             switch (jp.getCurrentTokenId()) {
             case JsonTokenId.ID_START_OBJECT:
                 {
+                    if (depth > MAX_DEPTH) {
+                        throw new JsonParseException("JSON is too deeply nested.", jp.getCurrentLocation());
+                    }
                     JsonToken t = jp.nextToken();
                     if (t  == JsonToken.END_OBJECT) {
                         return new LinkedHashMap<String,Object>(2);
                     }
                 }
             case JsonTokenId.ID_FIELD_NAME:
-                return mapObject(jp, ctxt);
+                return mapObject(jp, ctxt, depth);
             case JsonTokenId.ID_START_ARRAY:
                 {
+                    if (depth > MAX_DEPTH) {
+                        throw new JsonParseException("JSON is too deeply nested.", jp.getCurrentLocation());
+                    }
                     JsonToken t = jp.nextToken();
                     if (t == JsonToken.END_ARRAY) { // and empty one too
                         if (ctxt.isEnabled(DeserializationFeature.USE_JAVA_ARRAY_FOR_JSON_ARRAY)) {
@@ -455,9 +479,9 @@ public class UntypedObjectDeserializer
                     }
                 }
                 if (ctxt.isEnabled(DeserializationFeature.USE_JAVA_ARRAY_FOR_JSON_ARRAY)) {
-                    return mapArrayToArray(jp, ctxt);
+                    return mapArrayToArray(jp, ctxt, depth);
                 }
-                return mapArray(jp, ctxt);
+                return mapArray(jp, ctxt, depth);
             case JsonTokenId.ID_EMBEDDED_OBJECT:
                 return jp.getEmbeddedObject();
             case JsonTokenId.ID_STRING:
@@ -528,15 +552,15 @@ public class UntypedObjectDeserializer
             }
         }
 
-        protected Object mapArray(JsonParser jp, DeserializationContext ctxt) throws IOException
+        protected Object mapArray(JsonParser jp, DeserializationContext ctxt, int depth)  throws IOException
         {
-            Object value = deserialize(jp, ctxt);
+            Object value = _deserialize(jp, ctxt, depth + 1);
             if (jp.nextToken()  == JsonToken.END_ARRAY) {
                 ArrayList<Object> l = new ArrayList<Object>(2);
                 l.add(value);
                 return l;
             }
-            Object value2 = deserialize(jp, ctxt);
+            Object value2 = _deserialize(jp, ctxt, depth + 1);
             if (jp.nextToken()  == JsonToken.END_ARRAY) {
                 ArrayList<Object> l = new ArrayList<Object>(2);
                 l.add(value);
@@ -550,7 +574,7 @@ public class UntypedObjectDeserializer
             values[ptr++] = value2;
             int totalSize = ptr;
             do {
-                value = deserialize(jp, ctxt);
+                value = _deserialize(jp, ctxt, depth + 1);
                 ++totalSize;
                 if (ptr >= values.length) {
                     values = buffer.appendCompletedChunk(values);
@@ -567,12 +591,12 @@ public class UntypedObjectDeserializer
         /**
          * Method called to map a JSON Object into a Java value.
          */
-        protected Object mapObject(JsonParser jp, DeserializationContext ctxt) throws IOException
+        protected Object mapObject(JsonParser jp, DeserializationContext ctxt, int depth)  throws IOException
         {
             // will point to FIELD_NAME at this point, guaranteed
             String field1 = jp.getText();
             jp.nextToken();
-            Object value1 = deserialize(jp, ctxt);
+            Object value1 = _deserialize(jp, ctxt, depth + 1);
             if (jp.nextToken() == JsonToken.END_OBJECT) { // single entry; but we want modifiable
                 LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>(2);
                 result.put(field1, value1);
@@ -580,7 +604,7 @@ public class UntypedObjectDeserializer
             }
             String field2 = jp.getText();
             jp.nextToken();
-            Object value2 = deserialize(jp, ctxt);
+            Object value2 = _deserialize(jp, ctxt, depth + 1);
             if (jp.nextToken() == JsonToken.END_OBJECT) {
                 LinkedHashMap<String, Object> result = new LinkedHashMap<String, Object>(4);
                 result.put(field1, value1);
@@ -594,7 +618,7 @@ public class UntypedObjectDeserializer
             do {
                 String fieldName = jp.getText();
                 jp.nextToken();
-                result.put(fieldName, deserialize(jp, ctxt));
+                result.put(fieldName, _deserialize(jp, ctxt, depth+1));
             } while (jp.nextToken() != JsonToken.END_OBJECT);
             return result;
         }
@@ -602,12 +626,12 @@ public class UntypedObjectDeserializer
         /**
          * Method called to map a JSON Array into a Java Object array (Object[]).
          */
-        protected Object[] mapArrayToArray(JsonParser jp, DeserializationContext ctxt) throws IOException {
+        protected Object[] mapArrayToArray(JsonParser jp, DeserializationContext ctxt, int depth) throws IOException {
             ObjectBuffer buffer = ctxt.leaseObjectBuffer();
             Object[] values = buffer.resetAndStart();
             int ptr = 0;
             do {
-                Object value = deserialize(jp, ctxt);
+                Object value = _deserialize(jp, ctxt, depth + 1);
                 if (ptr >= values.length) {
                     values = buffer.appendCompletedChunk(values);
                     ptr = 0;
